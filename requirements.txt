@@ -1,5 +1,5 @@
 ag2[openai]==0.13.4
 groq==0.9.0
-streamlit==1.37.0
+gradio==4.44.0
 pandas==2.2.2
 python-dotenv==1.0.1

@@ -1,240 +1,384 @@
 """
-app.py — Streamlit UI: Customer Chat | Ticket Tracker | Dashboard
+app.py — Gradio UI for BankAssist AI (Hugging Face Spaces compatible)
 """
 
-import streamlit as st
+import os
+import gradio as gr
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from database import get_all_tickets, get_stats, get_ticket_logs, init_db
 from agents import process_customer_message, fetch_ticket_status, resolve_ticket
 
-st.set_page_config(page_title="BankAssist AI", page_icon="🏦",
-                   layout="wide", initial_sidebar_state="expanded")
 init_db()
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-[data-testid="stAppViewContainer"] { background:#0f1117; }
-[data-testid="stSidebar"]          { background:#161b22; border-right:1px solid #21262d; }
-[data-testid="metric-container"]   { background:#161b22; border:1px solid #21262d;
-                                     border-radius:12px; padding:16px 20px; }
-[data-testid="stMetricValue"] { color:#58a6ff; font-size:2rem !important; }
-[data-testid="stMetricLabel"] { color:#8b949e; font-size:0.8rem; }
+custom_css = """
+body { background: #0f1117 !important; }
 
-.user-bubble  { background:#1f6feb; color:white; border-radius:18px 18px 4px 18px;
-                padding:12px 16px; margin:6px 0; max-width:75%; margin-left:auto; }
-.agent-bubble { background:#161b22; border:1px solid #30363d; color:#c9d1d9;
-                border-radius:18px 18px 18px 4px; padding:12px 16px; margin:6px 0; max-width:75%; }
+.gradio-container {
+    background: #0f1117 !important;
+    color: #c9d1d9 !important;
+    font-family: 'Inter', sans-serif !important;
+    max-width: 1100px !important;
+    margin: 0 auto !important;
+}
 
-.badge-open        { background:#1f6feb22; color:#58a6ff; border:1px solid #1f6feb55;
-                     border-radius:20px; padding:2px 10px; font-size:0.78rem; }
-.badge-in_progress { background:#d2992222; color:#e3b341; border:1px solid #d2992255;
-                     border-radius:20px; padding:2px 10px; font-size:0.78rem; }
-.badge-resolved    { background:#2ea04322; color:#3fb950; border:1px solid #2ea04355;
-                     border-radius:20px; padding:2px 10px; font-size:0.78rem; }
+.gr-button-primary {
+    background: #1f6feb !important;
+    border: none !important;
+    color: white !important;
+    border-radius: 8px !important;
+}
 
-.tag-feedback_positive { color:#3fb950; font-weight:600; }
-.tag-feedback_negative { color:#f85149; font-weight:600; }
-.tag-query             { color:#79c0ff; font-weight:600; }
-.section-header { color:#8b949e; font-size:0.75rem; letter-spacing:0.1em;
-                  text-transform:uppercase; margin-bottom:8px; }
-#MainMenu, footer { visibility:hidden; }
-</style>
-""", unsafe_allow_html=True)
+.gr-button {
+    border-radius: 8px !important;
+}
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## 🏦 BankAssist AI")
-    st.markdown("<p style='color:#8b949e;font-size:0.85rem'>Multi-Agent Customer Support</p>",
-                unsafe_allow_html=True)
-    st.divider()
-    page = st.radio("Nav", ["💬 Customer Chat","🎫 Ticket Tracker","📊 Dashboard"],
-                    label_visibility="collapsed")
-    st.divider()
-    st.markdown("<p class='section-header'>Agent Pipeline</p>", unsafe_allow_html=True)
-    st.markdown("""
-    <div style='font-size:0.82rem;color:#8b949e;line-height:2'>
-    🔵 <b style='color:#c9d1d9'>ClassifierAgent</b><br>&nbsp;&nbsp;&nbsp;↓<br>
-    🟡 <b style='color:#c9d1d9'>ResponderAgent</b><br>&nbsp;&nbsp;&nbsp;↓<br>
-    🟢 <b style='color:#c9d1d9'>TicketAgent</b>
-    </div>""", unsafe_allow_html=True)
+.gr-input, .gr-textarea, .gr-dropdown {
+    background: #161b22 !important;
+    border: 1px solid #30363d !important;
+    color: #c9d1d9 !important;
+    border-radius: 8px !important;
+}
+
+.gr-panel, .gr-box {
+    background: #161b22 !important;
+    border: 1px solid #21262d !important;
+    border-radius: 12px !important;
+}
+
+.gr-tab-nav button {
+    background: #161b22 !important;
+    color: #8b949e !important;
+    border: 1px solid #21262d !important;
+}
+
+.gr-tab-nav button.selected {
+    background: #1f6feb !important;
+    color: white !important;
+}
+
+h1, h2, h3 { color: #58a6ff !important; }
+label { color: #8b949e !important; }
+
+.ticket-card {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 10px;
+    color: #c9d1d9;
+}
+"""
+
+
+# ── Helper: format ticket as HTML card ────────────────────────────────────────
+def ticket_to_html(t: dict) -> str:
+    status_colors = {
+        "open":        ("#58a6ff", "#1f6feb22"),
+        "in_progress": ("#e3b341", "#d2992222"),
+        "resolved":    ("#3fb950", "#2ea04322"),
+    }
+    cat_colors = {
+        "feedback_positive": "#3fb950",
+        "feedback_negative": "#f85149",
+        "query":             "#79c0ff",
+    }
+    sc, sbg = status_colors.get(t["status"], ("#8b949e", "#21262d"))
+    cc       = cat_colors.get(t["category"], "#8b949e")
+    created  = t["created_at"][:16].replace("T", " ")
+    cat_label = t["category"].replace("_", " ").title()
+
+    return f"""
+    <div class='ticket-card'>
+        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;'>
+            <span style='font-family:monospace;color:#8b949e;font-size:0.85rem'>{t['ticket_id']}</span>
+            <span style='background:{sbg};color:{sc};border-radius:20px;padding:2px 12px;font-size:0.78rem'>
+                {t['status'].replace('_',' ').title()}
+            </span>
+        </div>
+        <div style='font-weight:600;color:#c9d1d9;margin-bottom:4px;'>{t['user_name']}</div>
+        <div style='color:#8b949e;font-size:0.8rem;margin-bottom:8px;'>{created}</div>
+        <div style='margin-bottom:6px;'>
+            <span style='color:{cc};font-weight:600;font-size:0.85rem'>{cat_label}</span>
+            <span style='color:#8b949e;font-size:0.85rem;margin-left:8px'>· {t['sentiment'].title()}</span>
+        </div>
+        <div style='background:#0f1117;border-radius:8px;padding:10px;font-size:0.88rem;color:#8b949e;margin-bottom:8px;'>
+            💬 {t['message']}
+        </div>
+        <div style='background:#1f6feb11;border:1px solid #1f6feb33;border-radius:8px;padding:10px;font-size:0.88rem;color:#c9d1d9;'>
+            🏦 {t['response']}
+        </div>
+    </div>
+    """
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 1 — Customer Chat
+# TAB 1 — Customer Chat
 # ══════════════════════════════════════════════════════════════════════════════
-if page == "💬 Customer Chat":
-    st.markdown("## 💬 Customer Support Chat")
-    st.markdown("<p style='color:#8b949e'>Messages are automatically classified, responded to, and logged as tickets.</p>",
-                unsafe_allow_html=True)
-    st.divider()
+def handle_message(user_name, message):
+    if not user_name.strip():
+        return "<p style='color:#f85149'>⚠️ Please enter your name.</p>"
+    if not message.strip():
+        return "<p style='color:#f85149'>⚠️ Please enter a message.</p>"
 
-    col1, col2 = st.columns([1.2, 1.8])
-
-    with col1:
-        st.markdown("<p class='section-header'>New Message</p>", unsafe_allow_html=True)
-        user_name = st.text_input("Your Name", placeholder="e.g. Priya Sharma")
-        samples = {
-            "Select a sample…": "",
-            "😊 Positive feedback":  "The new mobile banking app is absolutely fantastic! So much easier to manage my accounts.",
-            "😤 Negative feedback":  "My transaction has been stuck for 3 days. Nobody is helping me — this is unacceptable!",
-            "❓ Account query":      "What is the current interest rate on your 1-year fixed deposit?",
-            "🔒 Security concern":   "I noticed an unrecognised login attempt on my account. What should I do?",
+    try:
+        result = process_customer_message(user_name.strip(), message.strip())
+        cat_colors = {
+            "feedback_positive": "#3fb950",
+            "feedback_negative": "#f85149",
+            "query":             "#79c0ff",
         }
-        sample  = st.selectbox("Load a sample", list(samples.keys()))
-        message = st.text_area("Your Message", value=samples.get(sample,""),
-                               height=140, placeholder="Type your message here…")
-        submitted = st.button("🚀 Send to Agents", use_container_width=True, type="primary")
+        cc        = cat_colors.get(result["category"], "#8b949e")
+        cat_label = result["category"].replace("_", " ").title()
 
-    with col2:
-        st.markdown("<p class='section-header'>Agent Output</p>", unsafe_allow_html=True)
-        if submitted:
-            if not user_name.strip():
-                st.error("Please enter your name.")
-            elif not message.strip():
-                st.error("Please enter a message.")
-            else:
-                with st.spinner("🤖 Agents processing…"):
-                    try:
-                        result = process_customer_message(user_name.strip(), message.strip())
+        return f"""
+        <div style='margin-bottom:12px;'>
+            <div style='background:#1f6feb;color:white;border-radius:18px 18px 4px 18px;
+                        padding:12px 16px;max-width:75%;margin-left:auto;margin-bottom:8px;'>
+                <b>{user_name}</b><br>{message}
+            </div>
 
-                        st.markdown(f"<div class='user-bubble'><b>{user_name}</b><br>{message}</div>",
-                                    unsafe_allow_html=True)
+            <div style='display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center;'>
+                <span style='color:{cc};font-weight:600'>◉ {cat_label}</span>
+                <span style='color:#8b949e'>·</span>
+                <span style='color:#8b949e;font-size:0.85rem'>Sentiment: {result['sentiment'].title()}</span>
+                <span style='color:#8b949e'>·</span>
+                <span style='font-family:monospace;font-size:0.8rem;color:#8b949e'>{result['ticket_id']}</span>
+            </div>
 
-                        cat_label = result["category"].replace("_"," ").title()
-                        st.markdown(f"""
-                        <div style='display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center;'>
-                          <span class='tag-{result["category"]}'>◉ {cat_label}</span>
-                          <span style='color:#8b949e'>·</span>
-                          <span style='color:#8b949e;font-size:0.85rem'>Sentiment: {result["sentiment"].title()}</span>
-                          <span style='color:#8b949e'>·</span>
-                          <span style='font-family:monospace;font-size:0.8rem;color:#8b949e'>{result["ticket_id"]}</span>
-                        </div>""", unsafe_allow_html=True)
+            <div style='background:#161b22;border:1px solid #30363d;color:#c9d1d9;
+                        border-radius:18px 18px 18px 4px;padding:12px 16px;max-width:75%;'>
+                🏦 <b>BankAssist AI</b><br><br>{result['response']}
+            </div>
 
-                        st.markdown(f"<div class='agent-bubble'>🏦 <b>BankAssist AI</b><br><br>{result['response']}</div>",
-                                    unsafe_allow_html=True)
-                        st.success(f"✅ Ticket **{result['ticket_id']}** created!")
-
-                    except EnvironmentError as e:
-                        st.error(f"⚠️ {e}")
-                    except Exception as e:
-                        st.error(f"❌ Pipeline error: {e}")
-                        st.exception(e)
-        else:
-            st.markdown("""
-            <div style='text-align:center;padding:60px 20px;color:#484f58;'>
-              <div style='font-size:3rem'>🤖</div>
-              <div style='margin-top:12px'>Submit a message to see the agents in action</div>
-            </div>""", unsafe_allow_html=True)
+            <div style='margin-top:10px;background:#2ea04322;border:1px solid #2ea04355;
+                        border-radius:8px;padding:10px;color:#3fb950;font-size:0.88rem;'>
+                ✅ Ticket <b>{result['ticket_id']}</b> created successfully!
+            </div>
+        </div>
+        """
+    except EnvironmentError as e:
+        return f"<p style='color:#f85149'>⚠️ {e}</p>"
+    except Exception as e:
+        return f"<p style='color:#f85149'>❌ Pipeline error: {e}</p>"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 2 — Ticket Tracker
+# TAB 2 — Ticket Tracker
 # ══════════════════════════════════════════════════════════════════════════════
-elif page == "🎫 Ticket Tracker":
-    st.markdown("## 🎫 Ticket Tracker")
-    st.divider()
-    tab1, tab2 = st.tabs(["All Tickets", "Lookup & Update"])
+def load_tickets(status_filter, search):
+    tickets = get_all_tickets()
+    if not tickets:
+        return "<p style='color:#8b949e;text-align:center;padding:40px'>No tickets yet. Go to Customer Chat to create one!</p>"
 
-    with tab1:
-        tickets = get_all_tickets()
-        if not tickets:
-            st.info("No tickets yet. Go to Customer Chat to create one!")
-        else:
-            c1, c2, c3 = st.columns(3)
-            status_f = c1.multiselect("Status",   ["open","in_progress","resolved"],
-                                      default=["open","in_progress","resolved"])
-            cat_f    = c2.multiselect("Category", ["feedback_positive","feedback_negative","query"],
-                                      default=["feedback_positive","feedback_negative","query"])
-            search   = c3.text_input("Search name / ID", placeholder="Priya or TKT-…")
+    filtered = [
+        t for t in tickets
+        if (status_filter == "All" or t["status"] == status_filter)
+        and (not search or search.lower() in t["user_name"].lower()
+                        or search.lower() in t["ticket_id"].lower())
+    ]
 
-            filtered = [t for t in tickets
-                        if t["status"] in status_f and t["category"] in cat_f
-                        and (not search or search.lower() in t["user_name"].lower()
-                                        or search.lower() in t["ticket_id"].lower())]
+    if not filtered:
+        return "<p style='color:#8b949e;text-align:center;padding:40px'>No tickets match your filter.</p>"
 
-            st.markdown(f"<p style='color:#8b949e;font-size:0.85rem'>{len(filtered)} ticket(s)</p>",
-                        unsafe_allow_html=True)
+    html = f"<p style='color:#8b949e;font-size:0.85rem;margin-bottom:12px'>{len(filtered)} ticket(s) found</p>"
+    for t in filtered:
+        html += ticket_to_html(t)
+    return html
 
-            for t in filtered:
-                created = t["created_at"][:16].replace("T"," ")
-                with st.expander(f"🎫 {t['ticket_id']} — {t['user_name']} ({created})"):
-                    r1, r2, r3 = st.columns(3)
-                    r1.markdown(f"<span class='badge-{t['status']}'>{t['status'].replace('_',' ').title()}</span>",
-                                unsafe_allow_html=True)
-                    r2.markdown(f"<span class='tag-{t['category']}'>{t['category'].replace('_',' ').title()}</span>",
-                                unsafe_allow_html=True)
-                    r3.markdown(f"<span style='color:#8b949e'>Sentiment: {t['sentiment'].title()}</span>",
-                                unsafe_allow_html=True)
-                    st.markdown(f"**Message:** {t['message']}")
-                    st.info(f"**AI Response:** {t['response']}")
 
-    with tab2:
-        st.markdown("<p class='section-header'>Lookup</p>", unsafe_allow_html=True)
-        lid = st.text_input("Ticket ID", placeholder="TKT-XXXXXXXX")
-        if st.button("🔍 Fetch"):
-            t = fetch_ticket_status(lid.strip())
-            if t:
-                st.markdown(f"**{t['ticket_id']}** — {t['user_name']}")
-                st.metric("Status", t["status"].replace("_"," ").title())
-                st.markdown(f"**Message:** {t['message']}")
-                st.info(t["response"])
-                logs = get_ticket_logs(lid.strip())
-                if logs:
-                    df = pd.DataFrame(logs)[["timestamp","action","details"]]
-                    df["timestamp"] = df["timestamp"].str[:16].str.replace("T"," ")
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.error("Ticket not found.")
+def lookup_ticket(ticket_id):
+    if not ticket_id.strip():
+        return "<p style='color:#f85149'>Please enter a ticket ID.</p>"
+    t = fetch_ticket_status(ticket_id.strip())
+    if not t:
+        return "<p style='color:#f85149'>❌ Ticket not found.</p>"
 
-        st.divider()
-        st.markdown("<p class='section-header'>Update Status</p>", unsafe_allow_html=True)
-        uid = st.text_input("Ticket ID to Update", placeholder="TKT-XXXXXXXX", key="uid")
-        ns  = st.selectbox("New Status", ["open","in_progress","resolved"])
-        if st.button("✅ Update"):
-            st.success(f"Updated to **{ns}**") if resolve_ticket(uid.strip(), ns) else st.error("Not found.")
+    logs = get_ticket_logs(ticket_id.strip())
+    log_html = ""
+    if logs:
+        log_html = "<div style='margin-top:10px;'><b style='color:#8b949e;font-size:0.8rem'>AUDIT LOG</b>"
+        for l in logs:
+            log_html += f"""
+            <div style='background:#0f1117;border-radius:6px;padding:8px;margin-top:6px;font-size:0.82rem;color:#8b949e;'>
+                <span style='color:#58a6ff'>{l['timestamp'][:16].replace('T',' ')}</span>
+                · {l['action']} · {l['details']}
+            </div>"""
+        log_html += "</div>"
+
+    return ticket_to_html(t) + log_html
+
+
+def update_status(ticket_id, new_status):
+    if not ticket_id.strip():
+        return "<p style='color:#f85149'>Please enter a ticket ID.</p>"
+    ok = resolve_ticket(ticket_id.strip(), new_status)
+    if ok:
+        return f"<p style='color:#3fb950'>✅ Ticket <b>{ticket_id}</b> updated to <b>{new_status}</b></p>"
+    return "<p style='color:#f85149'>❌ Ticket not found.</p>"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 3 — Dashboard
+# TAB 3 — Dashboard
 # ══════════════════════════════════════════════════════════════════════════════
-elif page == "📊 Dashboard":
-    st.markdown("## 📊 Analytics Dashboard")
-    st.divider()
+def load_dashboard():
     stats = get_stats()
 
-    k1,k2,k3,k4 = st.columns(4)
-    k1.metric("Total Tickets", stats["total"])
-    k2.metric("Open",          stats["open"])
-    k3.metric("In Progress",   stats["in_progress"])
-    k4.metric("Resolved",      stats["resolved"])
-    st.divider()
+    kpi_html = f"""
+    <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;'>
+        <div style='background:#161b22;border:1px solid #21262d;border-radius:12px;padding:16px;text-align:center;'>
+            <div style='font-size:2rem;color:#58a6ff;font-weight:700'>{stats['total']}</div>
+            <div style='color:#8b949e;font-size:0.8rem'>Total Tickets</div>
+        </div>
+        <div style='background:#161b22;border:1px solid #21262d;border-radius:12px;padding:16px;text-align:center;'>
+            <div style='font-size:2rem;color:#58a6ff;font-weight:700'>{stats['open']}</div>
+            <div style='color:#8b949e;font-size:0.8rem'>Open</div>
+        </div>
+        <div style='background:#161b22;border:1px solid #21262d;border-radius:12px;padding:16px;text-align:center;'>
+            <div style='font-size:2rem;color:#e3b341;font-weight:700'>{stats['in_progress']}</div>
+            <div style='color:#8b949e;font-size:0.8rem'>In Progress</div>
+        </div>
+        <div style='background:#161b22;border:1px solid #21262d;border-radius:12px;padding:16px;text-align:center;'>
+            <div style='font-size:2rem;color:#3fb950;font-weight:700'>{stats['resolved']}</div>
+            <div style='color:#8b949e;font-size:0.8rem'>Resolved</div>
+        </div>
+    </div>
+    """
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### By Category")
-        if stats["by_category"]:
-            df = pd.DataFrame({"Category":[k.replace("_"," ").title() for k in stats["by_category"]],
-                               "Count": list(stats["by_category"].values())})
-            st.bar_chart(df.set_index("Category"), color="#1f6feb")
-        else:
-            st.info("No data yet.")
-    with c2:
-        st.markdown("#### By Sentiment")
-        if stats["by_sentiment"]:
-            df = pd.DataFrame({"Sentiment":[k.title() for k in stats["by_sentiment"]],
-                               "Count": list(stats["by_sentiment"].values())})
-            st.bar_chart(df.set_index("Sentiment"), color="#3fb950")
-        else:
-            st.info("No data yet.")
-
-    st.divider()
-    st.markdown("#### All Tickets")
-    all_t = get_all_tickets()
-    if all_t:
-        df = pd.DataFrame(all_t)[["ticket_id","user_name","category","sentiment","status","created_at"]]
+    all_tickets = get_all_tickets()
+    if all_tickets:
+        df = pd.DataFrame(all_tickets)[["ticket_id","user_name","category","sentiment","status","created_at"]]
         df["created_at"] = df["created_at"].str[:16].str.replace("T"," ")
         df.columns = ["Ticket ID","Customer","Category","Sentiment","Status","Created At"]
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        table_html = df.to_html(index=False, border=0,
+                                classes="",
+                                justify="left").replace(
+            "<table",
+            "<table style='width:100%;border-collapse:collapse;color:#c9d1d9;font-size:0.85rem'"
+        ).replace("<th>", "<th style='color:#8b949e;padding:8px;border-bottom:1px solid #21262d;text-align:left'>") \
+         .replace("<td>", "<td style='padding:8px;border-bottom:1px solid #21262d'>")
     else:
-        st.info("No tickets yet.")
+        table_html = "<p style='color:#8b949e'>No tickets yet.</p>"
+
+    return kpi_html + "<h3 style='color:#58a6ff'>Recent Tickets</h3>" + table_html
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BUILD GRADIO APP
+# ══════════════════════════════════════════════════════════════════════════════
+with gr.Blocks(css=custom_css, title="BankAssist AI") as demo:
+
+    gr.HTML("""
+    <div style='text-align:center;padding:24px 0 8px;'>
+        <h1 style='font-size:2rem;margin-bottom:4px'>🏦 BankAssist AI</h1>
+        <p style='color:#8b949e;font-size:0.95rem'>
+            Multi-Agent Banking Customer Support · AutoGen · Groq LLaMA 3.3 70B
+        </p>
+        <div style='display:flex;justify-content:center;gap:12px;margin-top:10px;flex-wrap:wrap;'>
+            <span style='background:#1f6feb22;color:#58a6ff;border:1px solid #1f6feb55;
+                         border-radius:20px;padding:3px 12px;font-size:0.78rem'>🔵 ClassifierAgent</span>
+            <span style='color:#484f58'>→</span>
+            <span style='background:#d2992222;color:#e3b341;border:1px solid #d2992255;
+                         border-radius:20px;padding:3px 12px;font-size:0.78rem'>🟡 ResponderAgent</span>
+            <span style='color:#484f58'>→</span>
+            <span style='background:#2ea04322;color:#3fb950;border:1px solid #2ea04355;
+                         border-radius:20px;padding:3px 12px;font-size:0.78rem'>🟢 TicketAgent</span>
+        </div>
+    </div>
+    """)
+
+    with gr.Tabs():
+
+        # ── Tab 1: Chat ────────────────────────────────────────────────────
+        with gr.Tab("💬 Customer Chat"):
+            gr.HTML("<p style='color:#8b949e;margin-bottom:16px'>Submit a message — agents will classify, respond, and raise a ticket automatically.</p>")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    name_input = gr.Textbox(label="Your Name", placeholder="e.g. Priya Sharma")
+                    sample_dd  = gr.Dropdown(
+                        label="Load a sample message",
+                        choices=[
+                            "Select a sample…",
+                            "😊 Positive feedback",
+                            "😤 Negative feedback",
+                            "❓ Account query",
+                            "🔒 Security concern",
+                        ],
+                        value="Select a sample…",
+                    )
+                    msg_input = gr.Textbox(label="Your Message", lines=5,
+                                           placeholder="Type your message here…")
+                    send_btn  = gr.Button("🚀 Send to Agents", variant="primary")
+
+                with gr.Column(scale=2):
+                    chat_output = gr.HTML(
+                        value="<div style='text-align:center;padding:60px;color:#484f58;'>"
+                              "<div style='font-size:3rem'>🤖</div>"
+                              "<div style='margin-top:12px'>Submit a message to see the agents in action</div>"
+                              "</div>"
+                    )
+
+            samples_map = {
+                "Select a sample…":  "",
+                "😊 Positive feedback": "The new mobile banking app is absolutely fantastic! So much easier to manage my accounts.",
+                "😤 Negative feedback": "My transaction has been stuck for 3 days. Nobody is helping me — this is unacceptable!",
+                "❓ Account query":     "What is the current interest rate on your 1-year fixed deposit?",
+                "🔒 Security concern":  "I noticed an unrecognised login attempt on my account. What should I do?",
+            }
+
+            def fill_sample(choice):
+                return samples_map.get(choice, "")
+
+            sample_dd.change(fill_sample, inputs=sample_dd, outputs=msg_input)
+            send_btn.click(handle_message, inputs=[name_input, msg_input], outputs=chat_output)
+
+        # ── Tab 2: Ticket Tracker ──────────────────────────────────────────
+        with gr.Tab("🎫 Ticket Tracker"):
+            with gr.Row():
+                status_dd = gr.Dropdown(
+                    label="Filter by Status",
+                    choices=["All", "open", "in_progress", "resolved"],
+                    value="All",
+                )
+                search_box = gr.Textbox(label="Search by name or ticket ID",
+                                        placeholder="e.g. Priya or TKT-…")
+                refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
+
+            tickets_html = gr.HTML()
+            refresh_btn.click(load_tickets, inputs=[status_dd, search_box], outputs=tickets_html)
+            status_dd.change(load_tickets,  inputs=[status_dd, search_box], outputs=tickets_html)
+
+            gr.HTML("<hr style='border-color:#21262d;margin:20px 0'>")
+            gr.HTML("<h3 style='color:#58a6ff'>🔍 Lookup & Update Ticket</h3>")
+
+            with gr.Row():
+                lookup_input = gr.Textbox(label="Ticket ID", placeholder="TKT-XXXXXXXX")
+                lookup_btn   = gr.Button("🔍 Fetch Ticket", variant="secondary")
+
+            lookup_output = gr.HTML()
+            lookup_btn.click(lookup_ticket, inputs=lookup_input, outputs=lookup_output)
+
+            gr.HTML("<hr style='border-color:#21262d;margin:16px 0'>")
+            with gr.Row():
+                update_id     = gr.Textbox(label="Ticket ID to Update", placeholder="TKT-XXXXXXXX")
+                update_status_dd = gr.Dropdown(label="New Status",
+                                               choices=["open","in_progress","resolved"],
+                                               value="in_progress")
+                update_btn    = gr.Button("✅ Update Status", variant="primary")
+
+            update_output = gr.HTML()
+            update_btn.click(update_status, inputs=[update_id, update_status_dd], outputs=update_output)
+
+        # ── Tab 3: Dashboard ───────────────────────────────────────────────
+        with gr.Tab("📊 Dashboard"):
+            dash_btn  = gr.Button("🔄 Load Dashboard", variant="primary")
+            dash_html = gr.HTML()
+            dash_btn.click(load_dashboard, outputs=dash_html)
+
+
+if __name__ == "__main__":
+    demo.launch()
