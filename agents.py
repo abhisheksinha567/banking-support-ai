@@ -4,11 +4,18 @@ agents.py — Multi-agent banking support pipeline (AG2 + Groq).
 
 import json, os, re
 from dotenv import load_dotenv
+load_dotenv()
+
+# Works locally (.env) AND on Streamlit Cloud (st.secrets)
+try:
+    import streamlit as st
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+except Exception:
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
 import autogen
 from database import create_ticket, get_ticket, update_ticket_status
 
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 GROQ_CONFIG = {
     "config_list": [{
@@ -81,7 +88,7 @@ user_proxy = autogen.UserProxyAgent(
 # ── Public API ─────────────────────────────────────────────────────────────
 def process_customer_message(user_name: str, message: str) -> dict:
     if not GROQ_API_KEY:
-        raise EnvironmentError("GROQ_API_KEY is not set in your .env file.")
+        raise EnvironmentError("GROQ_API_KEY is not set in your .env file or Streamlit secrets.")
 
     # Step 1 — Classify
     result = user_proxy.initiate_chat(
@@ -100,8 +107,8 @@ def process_customer_message(user_name: str, message: str) -> dict:
         responder_agent,
         message=json.dumps({
             "user_name": user_name,
-            "message": message,
-            "category": category,
+            "message":   message,
+            "category":  category,
             "sentiment": sentiment,
         }),
         max_turns=1,
